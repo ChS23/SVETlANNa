@@ -1,5 +1,7 @@
-from typing import Iterable
-from .elements import Element
+from typing import Iterable, Union
+from .elements.element import Element
+from .elements.element_parameters import ElementParameters
+from .simulation_parameters import SimulationParameters
 from .specs import ParameterSpecs, SubelementSpecs
 from torch import nn
 from torch import Tensor
@@ -9,23 +11,85 @@ from .visualization import jinja_env, ElementHTML
 
 class LinearOpticalSetup(nn.Module):
     """
-    A linear optical network composed of Element's
+    A linear optical network composed of Element's.
+    
+    Supports both Element instances and ElementParameters for convenient setup creation.
+    When ElementParameters are provided, simulation_parameters must also be specified.
     """
-    def __init__(self, elements: Iterable[Element]) -> None:
+    
+    def __init__(
+        self, 
+        elements: Iterable[Union[Element, ElementParameters]], 
+        simulation_parameters: SimulationParameters | None = None
+    ) -> None:
         """
+        Create a linear optical setup.
+        
         Parameters
         ----------
-        elements : Iterable[Element]
-            A set of optical elements which make up a setup.
+        elements : Iterable[Union[Element, ElementParameters]]
+            A sequence of optical elements or element parameters.
+            If ElementParameters are provided, simulation_parameters must be specified.
+        simulation_parameters : SimulationParameters | None, optional
+            Required when elements contains ElementParameters.
+            Used to create Element instances from ElementParameters.
+            
+        Examples
+        --------
+        >>> # Traditional approach with Element instances
+        >>> setup = LinearOpticalSetup([
+        ...     FreeSpace(sim_params, distance=0.1, method='AS'),
+        ...     DiffractiveLayer(sim_params, mask=torch.rand(100, 100))
+        ... ])
+        >>> 
+        >>> # New approach with ElementParameters
+        >>> setup = LinearOpticalSetup([
+        ...     FreeSpaceParameters(distance=0.1, method='AS'),
+        ...     DiffractiveLayerParameters(mask=torch.rand(100, 100))
+        ... ], simulation_parameters=sim_params)
+        >>> 
+        >>> # Mixed approach
+        >>> setup = LinearOpticalSetup([
+        ...     FreeSpace(sim_params, distance=0.1, method='AS'),  # Element
+        ...     DiffractiveLayerParameters(mask=torch.rand(100, 100))  # Parameters
+        ... ], simulation_parameters=sim_params)
         """
         super().__init__()
 
-        elements = list(elements)
-        self.elements = elements
-        self.net = nn.Sequential(*elements)  # torch network
+        elements_list = list(elements)
+        
+        has_parameters = any(isinstance(elem, ElementParameters) for elem in elements_list)
+        
+        if has_parameters and simulation_parameters is None:
+            raise ValueError(
+                "simulation_parameters is required when elements contains ElementParameters"
+            )
+        
+        created_elements = []
+        for elem in elements_list:
+            if isinstance(elem, ElementParameters):
+                if not hasattr(type(elem), 'element_class') or type(elem).element_class is None:
+                    raise ValueError(
+                        f"{type(elem).__name__} must set element_class class attribute"
+                    )
+                
+                element_class = type(elem).element_class()
+                created_element = element_class.from_params(elem, simulation_parameters)
+                created_elements.append(created_element)
+            elif isinstance(elem, Element):
+                created_elements.append(elem)
+            else:
+                raise TypeError(
+                    f"Each element must be either Element or ElementParameters, "
+                    f"got {type(elem)}"
+                )
 
-        if len(elements) > 0:
-            first_sim_params = elements[0].simulation_parameters
+        self.elements = created_elements
+        self.net = nn.Sequential(*created_elements)
+
+        # Validate simulation parameters consistency
+        if len(created_elements) > 0:
+            first_sim_params = created_elements[0].simulation_parameters
 
             def check_sim_params(element: Element) -> bool:
                 return element.simulation_parameters is first_sim_params
@@ -37,11 +101,12 @@ class LinearOpticalSetup(nn.Module):
                     "the same SimulationParameters instance."
                 )
 
+        # Setup reverse propagation if supported
         if all((hasattr(el, 'reverse') for el in self.elements)):
 
             class ReverseNet(nn.Module):
                 def forward(self, Ein: Tensor) -> Tensor:
-                    for el in reversed(elements):
+                    for el in reversed(created_elements):
                         Ein = el.reverse(Ein)
                     return Ein
 

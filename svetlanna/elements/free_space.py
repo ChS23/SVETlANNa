@@ -1,7 +1,9 @@
 from typing import Literal, Iterable
+from dataclasses import dataclass
 import torch
 
 from .element import Element
+from .element_parameters import ElementParameters, element_params
 from ..simulation_parameters import SimulationParameters
 from ..parameters import OptimizableFloat
 from ..wavefront import Wavefront
@@ -9,6 +11,42 @@ from ..axes_math import tensor_dot
 from warnings import warn
 from ..specs import PrettyReprRepr, ParameterSpecs
 from ..visualization import ElementHTML, jinja_env
+
+
+@element_params('FreeSpace')
+@dataclass
+class FreeSpaceParameters(ElementParameters):
+    """
+    Parameters for FreeSpace element.
+    
+    Parameters
+    ----------
+    distance : OptimizableFloat
+        The distance of free space propagation.
+    method : Literal['fresnel', 'AS'], optional
+        Method for propagation calculation:
+        - 'AS': Angular spectrum method (default)
+        - 'fresnel': Fresnel approximation
+        
+    Examples
+    --------
+    >>> params = FreeSpaceParameters(distance=0.1, method='AS')
+    >>> free_space = FreeSpace.from_params(params, simulation_parameters)
+    """
+    distance: OptimizableFloat
+    method: Literal['fresnel', 'AS'] = 'AS'
+    
+    def validate(self) -> None:
+        """Validate free space parameters."""
+        super().validate()
+        
+        if hasattr(self.distance, '__float__') and float(self.distance) <= 0:
+            raise ValueError("distance must be positive")
+        elif hasattr(self.distance, 'item') and self.distance.item() <= 0:
+            raise ValueError("distance must be positive")
+        
+        if self.method not in ['fresnel', 'AS']:
+            raise ValueError("method must be either 'fresnel' or 'AS'")
 
 
 class FreeSpace(Element):
@@ -173,6 +211,35 @@ class FreeSpace(Element):
                     'Consider increasing the distance '
                     'or decreasing the screen size.'
                 )
+
+    @classmethod
+    def from_params(
+        cls, 
+        params: FreeSpaceParameters, 
+        simulation_parameters: SimulationParameters
+    ) -> 'FreeSpace':
+        """
+        Create FreeSpace from parameters.
+        
+        Parameters
+        ----------
+        params : FreeSpaceParameters
+            Parameters for the free space element.
+        simulation_parameters : SimulationParameters
+            Simulation parameters for the optical system.
+            
+        Returns
+        -------
+        FreeSpace
+            Created free space element.
+            
+        Examples
+        --------
+        >>> params = FreeSpaceParameters(distance=0.1, method='AS')
+        >>> free_space = FreeSpace.from_params(params, sim_params)
+        """
+        params.validate()
+        return cls(simulation_parameters, **params.to_kwargs())
 
     def impulse_response_angular_spectrum(self) -> torch.Tensor:
         """Creates the impulse response function for angular spectrum method

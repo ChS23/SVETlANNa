@@ -1,11 +1,48 @@
 import torch
+from dataclasses import dataclass
 from .element import Element
+from .element_parameters import ElementParameters, element_params
 from ..simulation_parameters import SimulationParameters
 from ..wavefront import Wavefront, mul
 from ..parameters import OptimizableTensor
 from typing import Iterable
 from ..specs import ImageRepr, PrettyReprRepr, ParameterSpecs
 from ..visualization import jinja_env, ElementHTML
+
+
+@element_params('DiffractiveLayer')
+@dataclass
+class DiffractiveLayerParameters(ElementParameters):
+    """
+    Parameters for DiffractiveLayer element.
+    
+    Parameters
+    ----------
+    mask : OptimizableTensor
+        Phase mask for the diffractive layer.
+    mask_norm : float, optional
+        Normalization value for the phase mask. The phase addition
+        is calculated as `2*pi * mask / mask_norm`. Default is 2*pi.
+        
+    Examples
+    --------
+    >>> import torch
+    >>> mask = torch.rand(100, 100)
+    >>> params = DiffractiveLayerParameters(mask=mask, mask_norm=2*torch.pi)
+    >>> layer = DiffractiveLayer.from_params(params, simulation_parameters)
+    """
+    mask: OptimizableTensor
+    mask_norm: float = 2 * torch.pi
+    
+    def validate(self) -> None:
+        """Validate diffractive layer parameters."""
+        super().validate()
+        
+        if self.mask_norm <= 0:
+            raise ValueError("mask_norm must be positive")
+        
+        if hasattr(self.mask, 'dim') and self.mask.dim() != 2:
+            raise ValueError("mask must be 2-dimensional")
 
 
 class DiffractiveLayer(Element):
@@ -37,6 +74,37 @@ class DiffractiveLayer(Element):
 
         self.mask = self.process_parameter('mask', mask)
         self.mask_norm = self.process_parameter('mask_norm', mask_norm)
+
+    @classmethod
+    def from_params(
+        cls, 
+        params: DiffractiveLayerParameters, 
+        simulation_parameters: SimulationParameters
+    ) -> 'DiffractiveLayer':
+        """
+        Create DiffractiveLayer from parameters.
+        
+        Parameters
+        ----------
+        params : DiffractiveLayerParameters
+            Parameters for the diffractive layer.
+        simulation_parameters : SimulationParameters
+            Simulation parameters for the optical system.
+            
+        Returns
+        -------
+        DiffractiveLayer
+            Created diffractive layer element.
+            
+        Examples
+        --------
+        >>> import torch
+        >>> mask = torch.rand(100, 100)
+        >>> params = DiffractiveLayerParameters(mask=mask)
+        >>> layer = DiffractiveLayer.from_params(params, sim_params)
+        """
+        params.validate()
+        return cls(simulation_parameters, **params.to_kwargs())
 
     @property
     def transmission_function(self) -> torch.Tensor:
