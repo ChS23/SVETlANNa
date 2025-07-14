@@ -29,7 +29,10 @@ dependencies = [
     "matplotlib<3.9.2",
     "anywidget (>=0.9.13,<0.10.0)",
     "jinja2 (>=3.1.6,<4.0.0)",
-    "ruff (>=0.12.3,<0.13.0)"
+    "lightning (>=2.5.2,<3.0.0)",
+    "ruff (>=0.12.3,<0.13.0)",
+    "optuna[integration] (>=4.4.0,<5.0.0)",
+    "optuna-integration[pytorch-lightning] (>=4.4.0,<5.0.0)"
 ]
 
 [project.urls]
