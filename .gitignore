@@ -168,3 +168,13 @@ cython_debug/
 examples/
 
 svetlanna_overview.md
+training_module_architecture.md
+svetlanna/training/*.md
+svetlanna/training/*example*
+svetlanna/training/*guide*
+svetlanna/training/*test*
+svetlanna/training/metrics/
+svetlanna/training/losses/
+svetlanna/training/exp/*
+svetlanna/training/mask.py
+svetlanna/training/wf_datasets.py
