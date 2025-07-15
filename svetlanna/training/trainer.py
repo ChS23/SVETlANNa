@@ -250,6 +250,8 @@ class SvetlannaTrainer:
             trainer._callbacks = callbacks or []
 
         # Configure logger
+        if trainer_config is None:
+            trainer_config = {}
         trainer._configure_logger(logger, log_dir, trainer_config)
 
         return trainer
@@ -350,12 +352,26 @@ class SvetlannaTrainer:
         generator_params = set(sig.parameters.keys())
         search_params = set(search_space.keys())
 
-        # Check for parameters in search_space that don't exist in generator
-        missing_params = search_params - generator_params
-        if missing_params:
+        # Define known training parameter names (same as in _separate_parameters)
+        training_param_names = {
+            'learning_rate', 'lr', 'weight_decay', 'batch_size', 'max_epochs',
+            'optimizer', 'optimizer_type', 'momentum', 'betas', 'eps', 'alpha',
+            'scheduler', 'scheduler_type', 'step_size', 'gamma', 'T_max', 
+            'patience', 'factor', 'min_lr', 'eta_min',
+            'gradient_clip_val', 'gradient_clip_algorithm', 'accumulate_grad_batches',
+            'precision', 'dropout_rate', 'label_smoothing'
+        }
+
+        # Separate architectural and training parameters
+        arch_params = search_params - training_param_names
+        training_params = search_params & training_param_names
+
+        # Check for architectural parameters that don't exist in generator
+        missing_arch_params = arch_params - generator_params
+        if missing_arch_params:
             raise ValueError(
-                f"Parameters {missing_params} from search_space not found in generator signature. "
-                f"Available parameters: {generator_params}"
+                f"Architectural parameters {missing_arch_params} from search_space not found in generator signature. "
+                f"Available generator parameters: {generator_params}"
             )
 
         # Validate each search space entry
@@ -721,8 +737,21 @@ class SvetlannaTrainer:
 
     def _update_with_best_params(self, best_params: dict[str, Any]) -> None:
         """Update trainer with best parameters found by optimization."""
-        # Create optical setup with best parameters
-        optical_setup = self._generator(**best_params)
+        # Define known training parameter names
+        training_param_names = {
+            'learning_rate', 'lr', 'weight_decay', 'batch_size', 'max_epochs',
+            'optimizer', 'optimizer_type', 'momentum', 'betas', 'eps', 'alpha',
+            'scheduler', 'scheduler_type', 'step_size', 'gamma', 'T_max', 
+            'patience', 'factor', 'min_lr', 'eta_min',
+            'gradient_clip_val', 'gradient_clip_algorithm', 'accumulate_grad_batches',
+            'precision', 'dropout_rate', 'label_smoothing'
+        }
+        
+        # Separate architectural and training parameters
+        arch_params = {k: v for k, v in best_params.items() if k not in training_param_names}
+        
+        # Create optical setup with architectural parameters
+        optical_setup = self._generator(**arch_params)
 
         # Create new Lightning module with best setup
         self._lightning_module = LinearOpticalSetupLightning(
@@ -839,19 +868,32 @@ class OptunaOptimizer:
         for param_name, param_spec in self.search_space.items():
             params[param_name] = self._suggest_parameter(trial, param_name, param_spec)
 
-        # Create optical setup with sampled parameters
-        optical_setup = self.generator(**params)
+        # Separate architectural and training parameters
+        arch_params, training_params = self._separate_parameters(params)
+
+        # Create optical setup with architectural parameters
+        optical_setup = self.generator(**arch_params)
+
+        # Create dynamic optimizer and trainer configs
+        dynamic_optimizer_config = self._create_optimizer_config(training_params)
+        dynamic_scheduler_config = self._create_scheduler_config(training_params)
+        dynamic_trainer_config = self._create_trainer_config(training_params)
+
+        # Update datamodule if batch_size is in training_params
+        if 'batch_size' in training_params:
+            self._update_datamodule_batch_size(training_params['batch_size'])
 
         # Create Lightning module
         lightning_module = LinearOpticalSetupLightning(
             optical_setup=optical_setup,
             loss_fn=self.loss_fn,
-            optimizer_config=self.optimizer_config,
+            optimizer_config=dynamic_optimizer_config,
+            scheduler_config=dynamic_scheduler_config,
             metrics=self.metrics
         )
 
         # Create trainer with pruning callback if needed
-        trainer_config = self.trainer_config.copy()
+        trainer_config = dynamic_trainer_config
 
         # Add pruning callback if trial supports it
         callbacks = trainer_config.get("callbacks", [])
@@ -969,3 +1011,169 @@ class OptunaOptimizer:
             return trial.suggest_categorical(param_name, choices)
 
         raise ValueError(f"Unsupported parameter type: {param_type}")
+
+    def _separate_parameters(self, params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Separate architectural and training parameters.
+        
+        Args:
+            params: All sampled parameters
+            
+        Returns:
+            Tuple of (architectural_params, training_params)
+        """
+        # Define known training parameter names
+        training_param_names = {
+            'learning_rate', 'lr', 'weight_decay', 'batch_size', 'max_epochs',
+            'optimizer', 'optimizer_type', 'momentum', 'betas', 'eps', 'alpha',
+            'scheduler', 'scheduler_type', 'step_size', 'gamma', 'T_max', 
+            'patience', 'factor', 'min_lr', 'eta_min',
+            'gradient_clip_val', 'gradient_clip_algorithm', 'accumulate_grad_batches',
+            'precision', 'dropout_rate', 'label_smoothing'
+        }
+        
+        arch_params = {}
+        training_params = {}
+        
+        for param_name, param_value in params.items():
+            if param_name in training_param_names:
+                training_params[param_name] = param_value
+            else:
+                arch_params[param_name] = param_value
+        
+        return arch_params, training_params
+
+    def _create_optimizer_config(self, training_params: dict[str, Any]) -> dict[str, Any]:
+        """Create optimizer configuration from training parameters.
+        
+        Args:
+            training_params: Training parameters from search space
+            
+        Returns:
+            Optimizer configuration dict
+        """
+        optimizer_config = self.optimizer_config.copy() if self.optimizer_config else {}
+        
+        # Map parameter names to optimizer config
+        param_mapping = {
+            'learning_rate': 'lr',
+            'lr': 'lr',
+            'weight_decay': 'weight_decay',
+            'optimizer': 'optimizer',
+            'optimizer_type': 'optimizer',
+            'momentum': 'momentum',
+            'betas': 'betas',
+            'eps': 'eps',
+            'alpha': 'alpha'
+        }
+        
+        for param_name, config_key in param_mapping.items():
+            if param_name in training_params:
+                optimizer_config[config_key] = training_params[param_name]
+        
+        return optimizer_config
+
+    def _create_scheduler_config(self, training_params: dict[str, Any]) -> dict[str, Any] | None:
+        """Create scheduler configuration from training parameters.
+        
+        Args:
+            training_params: Training parameters from search space
+            
+        Returns:
+            Scheduler configuration dict or None
+        """
+        scheduler_config = {}
+        
+        # Check if scheduler is specified
+        scheduler_type = training_params.get('scheduler') or training_params.get('scheduler_type')
+        if not scheduler_type:
+            return None
+        
+        scheduler_config['scheduler'] = scheduler_type
+        
+        # Add scheduler-specific parameters based on scheduler type
+        if scheduler_type == 'StepLR':
+            if 'step_size' in training_params:
+                scheduler_config['step_size'] = training_params['step_size']
+            if 'gamma' in training_params:
+                scheduler_config['gamma'] = training_params['gamma']
+        
+        elif scheduler_type == 'CosineAnnealingLR':
+            if 'T_max' in training_params:
+                scheduler_config['T_max'] = training_params['T_max']
+            if 'eta_min' in training_params:
+                scheduler_config['eta_min'] = training_params['eta_min']
+        
+        elif scheduler_type == 'ReduceLROnPlateau':
+            if 'patience' in training_params:
+                scheduler_config['patience'] = training_params['patience']
+            if 'factor' in training_params:
+                scheduler_config['factor'] = training_params['factor']
+            if 'min_lr' in training_params:
+                scheduler_config['min_lr'] = training_params['min_lr']
+            # ReduceLROnPlateau requires a monitor parameter
+            scheduler_config['monitor'] = 'val_loss'
+        
+        elif scheduler_type == 'ExponentialLR':
+            if 'gamma' in training_params:
+                scheduler_config['gamma'] = training_params['gamma']
+        
+        elif scheduler_type == 'MultiStepLR':
+            if 'gamma' in training_params:
+                scheduler_config['gamma'] = training_params['gamma']
+            # Note: milestones should be provided separately as it's a list
+        
+        elif scheduler_type == 'CyclicLR':
+            if 'base_lr' in training_params:
+                scheduler_config['base_lr'] = training_params['base_lr']
+            if 'max_lr' in training_params:
+                scheduler_config['max_lr'] = training_params['max_lr']
+            if 'step_size_up' in training_params:
+                scheduler_config['step_size_up'] = training_params['step_size_up']
+        
+        return scheduler_config
+
+    def _create_trainer_config(self, training_params: dict[str, Any]) -> dict[str, Any]:
+        """Create trainer configuration from training parameters.
+        
+        Args:
+            training_params: Training parameters from search space
+            
+        Returns:
+            Trainer configuration dict
+        """
+        trainer_config = self.trainer_config.copy()
+        
+        # Map parameter names to trainer config
+        param_mapping = {
+            'max_epochs': 'max_epochs',
+            'gradient_clip_val': 'gradient_clip_val',
+            'gradient_clip_algorithm': 'gradient_clip_algorithm',
+            'accumulate_grad_batches': 'accumulate_grad_batches',
+            'precision': 'precision'
+        }
+        
+        for param_name, config_key in param_mapping.items():
+            if param_name in training_params:
+                trainer_config[config_key] = training_params[param_name]
+        
+        return trainer_config
+
+    def _update_datamodule_batch_size(self, batch_size: int) -> None:
+        """Update datamodule batch size if supported.
+        
+        Args:
+            batch_size: New batch size
+        """
+        # Check if datamodule has batch_size attribute and update methods
+        if hasattr(self.datamodule, 'batch_size'):
+            self.datamodule.batch_size = batch_size
+        
+        # Try to update existing dataloaders if they exist
+        if hasattr(self.datamodule, 'train_dataloader') and callable(self.datamodule.train_dataloader):
+            # Force recreation of dataloaders by clearing cached versions
+            if hasattr(self.datamodule, '_train_dataloader'):
+                delattr(self.datamodule, '_train_dataloader')
+            if hasattr(self.datamodule, '_val_dataloader'):
+                delattr(self.datamodule, '_val_dataloader')
+            if hasattr(self.datamodule, '_test_dataloader'):
+                delattr(self.datamodule, '_test_dataloader')

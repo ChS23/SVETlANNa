@@ -262,6 +262,7 @@ class LinearOpticalSetupLightning(LightningModule):
         # Extract Lightning-specific params
         interval = scheduler_params.pop("interval", "epoch")
         frequency = scheduler_params.pop("frequency", 1)
+        monitor = scheduler_params.pop("monitor", None)
 
         if isinstance(scheduler_name, str):
             # Get scheduler class by name
@@ -273,14 +274,21 @@ class LinearOpticalSetupLightning(LightningModule):
         # Create scheduler
         scheduler = scheduler_cls(optimizer, **scheduler_params)
 
+        # Build scheduler configuration
+        scheduler_config = {
+            "scheduler": scheduler,
+            "interval": interval,
+            "frequency": frequency,
+        }
+
+        # Add monitor for ReduceLROnPlateau
+        if monitor is not None:
+            scheduler_config["monitor"] = monitor
+
         # Return optimizer and scheduler configuration
         return {
             "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": interval,
-                "frequency": frequency,
-            }
+            "lr_scheduler": scheduler_config
         }
 
     def on_train_epoch_end(self) -> None:
