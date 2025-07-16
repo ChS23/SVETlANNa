@@ -79,9 +79,14 @@ class AccuracyObjective(ObjectiveFunction):
         trainer_results: dict[str, Any],
         trial_params: dict[str, Any]
     ) -> float:
-        """Return validation loss (lower is better)."""
+        """Return validation loss (lower is better) or negative accuracy (for maximization)."""
         if hasattr(trainer_results, "callback_metrics"):
-            return trainer_results.callback_metrics.get(self.metric_name, float("inf"))
+            value = trainer_results.callback_metrics.get(self.metric_name, float("inf"))
+            # If metric is accuracy-like (higher is better), return negative value
+            if "accuracy" in self.metric_name.lower():
+                return -value if value != float("inf") else float("inf")
+            # If metric is loss-like (lower is better), return as-is
+            return value
         return float("inf")
 
 

@@ -98,6 +98,8 @@ class SvetlannaTrainer:
         metrics: list[Any] | None = None,
         objectives: list[ObjectiveFunction] | None = None,
         multi_objective_approach: str = "pareto",
+        objective_metric: str = "val_loss",
+        objective_direction: str = "minimize",
         sampler: str | Any | None = None,
         sampler_config: dict[str, Any] | None = None,
         pruner: str | Any | None = None,
@@ -131,6 +133,8 @@ class SvetlannaTrainer:
             metrics: List of metrics to track
             objectives: List of ObjectiveFunction for multi-objective optimization
             multi_objective_approach: 'pareto' for Pareto optimization, 'weighted' for scalarization
+            objective_metric: Metric name to optimize for single-objective optimization (default: 'val_loss')
+            objective_direction: Direction of optimization ('minimize' or 'maximize') (default: 'minimize')
             sampler: Optuna sampler ('tpe', 'random', 'grid', 'cmaes', 'nsgaii') or sampler instance
             sampler_config: Configuration parameters for the chosen sampler
             pruner: Optuna pruner ('hyperband', 'median', 'successive_halving', 'percentile') or pruner instance
@@ -241,6 +245,8 @@ class SvetlannaTrainer:
             trainer._n_trials = n_trials
             trainer._objectives = objectives
             trainer._multi_objective_approach = multi_objective_approach
+            trainer._objective_metric = objective_metric
+            trainer._objective_direction = objective_direction
             trainer._sampler = sampler
             trainer._sampler_config = sampler_config or {}
             trainer._pruner = pruner
@@ -558,7 +564,9 @@ class SvetlannaTrainer:
                 loss_fn=self._loss_fn,
                 optimizer_config=self._optimizer_config,
                 trainer_config=self._trainer_config,
-                metrics=self._metrics
+                metrics=self._metrics,
+                objective_metric=self._objective_metric,
+                objective_direction=self._objective_direction
             )
 
         # Create sampler, pruner, and storage
@@ -568,7 +576,7 @@ class SvetlannaTrainer:
 
         # Run optimization
         study = optuna.create_study(
-            direction="minimize",
+            direction=self._objective_direction,
             sampler=sampler,
             pruner=pruner,
             storage=storage,
@@ -820,7 +828,9 @@ class OptunaOptimizer:
         loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
         optimizer_config: dict[str, Any] | None = None,
         trainer_config: dict[str, Any] | None = None,
-        metrics: list[Any] | None = None
+        metrics: list[Any] | None = None,
+        objective_metric: str = "val_loss",
+        objective_direction: str = "minimize"
     ):
         """Initialize Optuna optimizer with enhanced search space support.
         
@@ -832,6 +842,8 @@ class OptunaOptimizer:
             optimizer_config: Optimizer configuration
             trainer_config: Lightning Trainer configuration
             metrics: List of metrics
+            objective_metric: Metric name to optimize (default: 'val_loss')
+            objective_direction: Direction of optimization ('minimize' or 'maximize') (default: 'minimize')
         """
         self.generator = generator
         self.datamodule = datamodule
@@ -839,6 +851,8 @@ class OptunaOptimizer:
         self.loss_fn = loss_fn
         self.optimizer_config = optimizer_config
         self.metrics = metrics
+        self._objective_metric = objective_metric
+        self._objective_direction = objective_direction
 
         # Configure trainer for optimization (short training for trials)
         self.trainer_config = trainer_config or {}
@@ -933,8 +947,17 @@ class OptunaOptimizer:
             # Re-raise pruning exception to let Optuna handle it
             raise
 
-        # Return validation loss for minimization
-        return trainer.callback_metrics.get("val_loss", float("inf")).item()
+        # Return configured objective metric for optimization
+        objective_metric = self._objective_metric
+        direction = self._objective_direction
+        
+        # Get default value based on direction
+        if direction == "minimize":
+            default_value = float("inf")
+        else:  # maximize
+            default_value = float("-inf")
+            
+        return trainer.callback_metrics.get(objective_metric, default_value).item()
 
     def _suggest_parameter(self, trial, param_name: str, param_spec: SearchSpaceValue) -> Any:
         """Suggest parameter value using appropriate Optuna suggest method.
