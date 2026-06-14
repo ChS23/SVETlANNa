@@ -294,3 +294,129 @@ def _interp2d(tensor: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
         mode="bilinear",
         align_corners=False,
     )[0, 0]
+
+
+# ── Filipovich 2024 discrete exponential coherence model ──────────────────
+
+
+class FilipoviCoherenceSource:
+    """Partially coherent MNIST source from the Filipovich 2024 coherence model.
+
+    Cross-spectral density between source pixels m and m':
+        J(m, m') = sqrt(I_m * I_m') * mu^‖r_m - r_m'‖_pixels
+
+    The coherence matrix C_µ(m,m') = mu^‖r_m - r_m'‖ is image-independent;
+    its eigenvectors {v_n} are precomputed once in ``__init__``.  Per-image
+    coherent modes are  φ_n = sqrt(I) ⊙ v_n  (element-wise on the DONN grid).
+
+    Parameters
+    ----------
+    mu : float
+        Coherence parameter in [0, 1].  mu=1 → coherent; mu=0 → incoherent.
+    src_shape : tuple[int, int]
+        (H_src, W_src) of the SOURCE pixel grid (e.g. (28, 28) for MNIST).
+        C_µ is built on this grid; eigenvectors are then upsampled to sim_params.
+    sim_params : SimulationParameters
+        DONN propagation grid (must match the intensity tensors passed to from_image).
+    power_fraction : float
+        Fraction of source power captured in the truncated mode set.
+    max_modes : int | None
+        Hard cap on the number of retained modes (useful for incoherent sources).
+    device : torch.device | None
+        Move weight/vector tensors to this device after construction.
+    """
+
+    def __init__(
+        self,
+        mu: float,
+        src_shape: tuple[int, int],
+        sim_params: SimulationParameters,
+        power_fraction: float = 0.99,
+        max_modes: int | None = None,
+        device=None,
+    ) -> None:
+        H_src, W_src = src_shape
+        N = H_src * W_src
+
+        # --- build C_µ on the source pixel grid ---
+        ys = torch.arange(H_src, dtype=torch.float32)
+        xs = torch.arange(W_src, dtype=torch.float32)
+        gy, gx = torch.meshgrid(ys, xs, indexing="ij")
+        coords = torch.stack([gy.flatten(), gx.flatten()], dim=1)  # (N, 2)
+        dist = torch.cdist(coords, coords)                          # (N, N)
+
+        if mu == 0.0:
+            C = torch.eye(N, dtype=torch.float64)
+        elif mu == 1.0:
+            C = torch.ones(N, N, dtype=torch.float64)
+        else:
+            C = (mu ** dist).to(torch.float64)
+
+        # --- eigendecompose (eigh: Hermitian, returns ascending eigenvalues) ---
+        vals, vecs = torch.linalg.eigh(C)   # vals (N,), vecs (N, N) columns
+        vals = vals.clamp(min=0.0).flip(0)  # descending
+        vecs = vecs.flip(1)                 # (N, N), columns now descending
+
+        # --- truncate to power_fraction ---
+        total = vals.sum()
+        if total > 0:
+            M = int((torch.cumsum(vals, 0) < power_fraction * total).sum()) + 1
+        else:
+            M = 1
+        if max_modes is not None:
+            M = min(M, int(max_modes))
+        M = max(1, M)
+
+        # --- upsample eigenvectors from src grid to DONN propagation grid ---
+        H_sp = len(sim_params.y)
+        W_sp = len(sim_params.x)
+        vecs_top = vecs[:, :M].T.float()               # (M, N)
+        vecs_2d  = vecs_top.reshape(M, 1, H_src, W_src)
+        if (H_src, W_src) == (H_sp, W_sp):
+            vecs_up = vecs_2d.squeeze(1)               # no interpolation needed
+        else:
+            vecs_up = F.interpolate(
+                vecs_2d, size=(H_sp, W_sp), mode="bilinear", align_corners=False
+            ).squeeze(1)                               # (M, H_sp, W_sp)
+
+        self.weights:   torch.Tensor = vals[:M].float()   # (M,)
+        self.vecs_up:   torch.Tensor = vecs_up            # (M, H_sp, W_sp)
+        self.src_shape  = src_shape
+        self.M          = M
+        self.sim_params = sim_params
+        self.sim_params_modes = _make_sim_params_modes(sim_params, M)
+
+        if device is not None:
+            self.to(device)
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def to(self, device) -> "FilipoviCoherenceSource":
+        """Move weight and vector tensors to device (in-place)."""
+        self.weights  = self.weights.to(device)
+        self.vecs_up  = self.vecs_up.to(device)
+        return self
+
+    # ── per-image source generation ───────────────────────────────────────────
+
+    def from_image(self, intensity: torch.Tensor) -> "PartiallyCoherentWavefront":
+        """Generate a PCW for a single MNIST input image.
+
+        Parameters
+        ----------
+        intensity : torch.Tensor
+            Shape (H_sp, W_sp) — intensity on the DONN propagation grid,
+            non-negative real values.  Typically obtained by bilinearly
+            resizing a 28×28 MNIST image to match sim_params.
+
+        Returns
+        -------
+        PartiallyCoherentWavefront
+            Modes (M, H_sp, W_sp) with weights from C_µ eigendecomposition.
+        """
+        sqrt_I = intensity.clamp(min=0.0).sqrt()                   # (H_sp, W_sp)
+        modes_real = self.vecs_up * sqrt_I.unsqueeze(0)            # (M, H_sp, W_sp)
+        modes = Wavefront(modes_real.to(torch.complex64))
+        return PartiallyCoherentWavefront(
+            modes, self.weights.clone(), self.sim_params, self.sim_params_modes
+        )
