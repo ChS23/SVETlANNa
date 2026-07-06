@@ -420,3 +420,33 @@ class FilipoviCoherenceSource:
         return PartiallyCoherentWavefront(
             modes, self.weights.clone(), self.sim_params, self.sim_params_modes
         )
+
+    def from_image_batch(self, intensity: torch.Tensor) -> "PartiallyCoherentWavefront":
+        """Generate a single PCW holding the modes of a whole batch of images.
+
+        The coherence eigenvectors ``vecs_up`` and ``weights`` are shared across
+        all images; only the per-image amplitude ``sqrt(I)`` differs.  Stacking
+        them on a leading batch axis lets the full data-batch propagate through
+        the optical setup in one GPU pass.
+
+        Parameters
+        ----------
+        intensity : torch.Tensor
+            Shape (B, H_sp, W_sp) — non-negative intensities on the DONN grid.
+
+        Returns
+        -------
+        PartiallyCoherentWavefront
+            Modes of shape (B, M, H_sp, W_sp) with the shared per-image weights.
+            ``detect`` sums over the mode axis, returning a (B, H_sp, W_sp) image.
+        """
+        if intensity.ndim != 3:
+            raise ValueError(
+                f"intensity must be (B, H_sp, W_sp), got shape {tuple(intensity.shape)}"
+            )
+        sqrt_I = intensity.clamp(min=0.0).sqrt()                   # (B, H_sp, W_sp)
+        modes_real = self.vecs_up.unsqueeze(0) * sqrt_I.unsqueeze(1)  # (B, M, H_sp, W_sp)
+        modes = Wavefront(modes_real.to(torch.complex64))
+        return PartiallyCoherentWavefront(
+            modes, self.weights.clone(), self.sim_params, self.sim_params_modes
+        )

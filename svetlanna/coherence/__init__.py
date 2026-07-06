@@ -24,6 +24,7 @@ from .sources import (
 )
 from .gamma import SpatialCoherence, coherence_forward
 from .sampling import sample_realizations, incoherent_source, detect_realizations
+from .assess import assess, SourceSpec, CoherenceAssessment
 
 __all__ = [
     "PartiallyCoherentWavefront",
@@ -36,4 +37,7 @@ __all__ = [
     "sample_realizations",
     "incoherent_source",
     "detect_realizations",
+    "assess",
+    "SourceSpec",
+    "CoherenceAssessment",
 ]

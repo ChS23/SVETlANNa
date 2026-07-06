@@ -168,3 +168,7 @@ cython_debug/
 # dev folders
 examples/
 experiments/
+
+# Downloaded datasets (MNIST etc.) — regenerated on demand by torchvision
+**/MNIST/
+*.gz
