@@ -172,3 +172,7 @@ experiments/
 # Downloaded datasets (MNIST etc.) — regenerated on demand by torchvision
 **/MNIST/
 *.gz
+
+# accidental local artifacts
+HWMonitor.txt
+log_computations.CSV
