@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from svetlanna import SimulationParameters
+from svetlanna.simulation_parameters import AxisNotFound
 from svetlanna.elements import Element
 from svetlanna.wavefront import Wavefront
 
@@ -13,7 +14,12 @@ class Detector(Element):
         (2) ...
     """
 
-    def __init__(self, simulation_parameters: SimulationParameters, func="intensity"):
+    def __init__(
+        self,
+        simulation_parameters: SimulationParameters,
+        func="intensity",
+        reduce_axes: tuple[str, ...] = (),
+    ):
         """
         Parameters
         ----------
@@ -24,10 +30,28 @@ class Detector(Element):
             to obtain a detector image.
             (1) func='intensity' – detector returns intensities
             (2) ...
+        reduce_axes : tuple[str, ...]
+            Names of ensemble axes to sum the detected intensity over, e.g.
+            ('mode',) or ('mode', 'wavelength') for partially coherent
+            illumination. Each axis must be registered in
+            `simulation_parameters`. Scalar axes (e.g. a monochromatic
+            'wavelength') do not occupy a tensor dimension and are skipped,
+            so the same configuration works for scalar and vector axes.
+            The sum is unweighted: ensemble weights (mode eigenvalues,
+            spectral density, 1/K of Monte-Carlo) are expected to be folded
+            into the field amplitudes by the source constructor.
         """
         super().__init__(simulation_parameters)
         # TODO: add some normalization for the output tensor of intensities? or not?
         self.func = func
+
+        self.reduce_axes = tuple(dict.fromkeys(reduce_axes))
+        for axis in self.reduce_axes:
+            if axis not in self.simulation_parameters:
+                raise AxisNotFound(
+                    f"reduce_axes axis '{axis}' is not registered "
+                    "in simulation_parameters"
+                )
 
     def forward(self, input_field: Wavefront) -> torch.Tensor:
         """
@@ -45,6 +69,7 @@ class Detector(Element):
         -------
         detector_output : torch.Tensor
             The image on a detector (according to self.func).
+            Ensemble axes listed in `reduce_axes` are summed out.
         """
         detector_output = None
 
@@ -53,6 +78,15 @@ class Detector(Element):
             detector_output = torch.Tensor(
                 input_field.abs().pow(2)
             )  # field absolute values squared
+
+            reduce_dims = tuple(
+                self.simulation_parameters.index(axis)
+                for axis in self.reduce_axes
+                # scalar axes have no tensor dimension to reduce
+                if axis in self.simulation_parameters.axis_names
+            )
+            if reduce_dims:
+                detector_output = detector_output.sum(dim=reduce_dims)
 
         return detector_output
 
@@ -304,18 +338,21 @@ class DetectorProcessorClf(nn.Module):
             A tensor of probabilities of element belonging to classes for further calculation of loss.
             shape=(1, self.num_classes)
         """
-        integrals_by_classes = torch.zeros(size=(1, self.num_classes))
-        # TODO: what to do with multiple wavelengths?
-        for ind_class in range(self.num_classes):
-            # `mask_class` will be on the same device as `self.segmented_detector`!
-            mask_class = torch.where(ind_class == self.segmented_detector, 1, 0)
-            integrals_by_classes[0, ind_class] = (
-                (detector_data * mask_class).sum().item()
-            )
+        # NOTE: built with differentiable ops (no .item()) so that gradients
+        # flow from the class probabilities back to the optical parameters.
+        integrals_by_classes = torch.stack(
+            [
+                (
+                    detector_data
+                    * torch.where(ind_class == self.segmented_detector, 1, 0)
+                ).sum()
+                for ind_class in range(self.num_classes)
+            ]
+        ).unsqueeze(0)
 
         integrals_by_classes = integrals_by_classes * self.segments_weights
         # TODO: maybe some function like SoftMax? but integrals can be large!
-        return integrals_by_classes / integrals_by_classes.sum().item()
+        return integrals_by_classes / integrals_by_classes.sum()
 
     def batch_zone_integral(
         self, batch_detector_data: torch.Tensor, ind_class: int
